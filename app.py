@@ -25,21 +25,17 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 텍스트 추출 및 정밀 필터링 함수 ---
+# --- 텍스트 추출 및 타이틀/노이즈 제거 함수 ---
 def extract_problems_with_pages(file):
     if file is None: return []
-    
-    # [중요] 파일 읽기 위치 초기화 (페이지 누락 방지 핵심)
     file.seek(0)
-    
     doc = fitz.open(stream=file.read(), filetype="pdf")
     all_problems = []
     
-    # [필터] 절대 문항이 될 수 없는 키워드 (여기에 '확인사항' 추가)
-    exclude_keywords = [
-        '수능특강', '발행처', 'EBS', '페이지', '과목', '학년도', 
-        '모의평가', '시험지', '교재', '판권', '확인사항', '유의사항', 
-        '정답과 해설', '수험번호', '성명'
+    # [강력 필터] 타이틀 및 안내문구 키워드
+    noise_keywords = [
+        '학년도', '영역', '생활과 윤리', '윤리와 사상', '사회·문화', '지리', '역사', 
+        '정답과 해설', '확인사항', '유의사항', '수험번호', '성명', 'EBS', '수능특강'
     ]
 
     for page_num in range(len(doc)):
@@ -47,29 +43,31 @@ def extract_problems_with_pages(file):
         page_text = page.get_text()
         current_page_no = page_num + 1
         
-        # 1. 문항 번호(숫자+점, 숫자+괄호 등) 기준으로 쪼개기
+        # 문항 번호 패턴으로 쪼개기
         split_text = re.split(r'\n(?=\d+[\.|\)])|(?<=\n)(?=\d+[\.|\)])|(?=\[\d+\])', page_text)
         
         for p in split_text:
             cleaned_p = p.strip()
             
-            # [조건 1] 너무 짧은 텍스트는 무시 (45자 미만)
-            if len(cleaned_p) < 45:
-                continue
+            # [필터 1] 너무 짧은 건 무조건 패스
+            if len(cleaned_p) < 45: continue
             
-            # [조건 2] 제외 키워드 필터링 (특히 '확인사항' 차단)
+            # [필터 2] 숫자로 시작하는지 확인 (진짜 문항은 보통 1. 또는 [01]로 시작)
+            starts_with_num = bool(re.match(r'^\d|^\[\d', cleaned_p))
+            
+            # [필터 3] 타이틀 노이즈 검사
             is_noise = False
-            for key in exclude_keywords:
+            for key in noise_keywords:
                 if key in cleaned_p:
-                    # 키워드가 포함되어 있는데, 숫자로 시작하지 않는다면 100% 노이즈(헤더/공지)
-                    if not re.match(r'^\d', cleaned_p):
+                    # 숫자로 시작하지 않으면서 과목명이 들어있으면 100% 타이틀 노이즈
+                    if not starts_with_num:
                         is_noise = True
                         break
             
             if not is_noise:
                 all_problems.append({
                     "text": cleaned_p, 
-                    "page": current_page_no  # 현재 분석 중인 실제 페이지 번호 기록
+                    "page": current_page_no
                 })
                 
     return all_problems
@@ -85,7 +83,7 @@ def highlight_common_words(text, reference_text):
 
 # --- UI 레이아웃 ---
 st.title("🔍 문항 유사도 정밀 분석기")
-st.write("PDF의 '확인사항' 등 불필요한 정보는 제외하고 문항만 정밀하게 분석합니다.")
+st.write("시험지 타이틀(학년도, 과목명) 및 확인사항을 자동으로 제외하고 분석합니다.")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -95,16 +93,15 @@ with col2:
     st.markdown("#### 📝 대상 PDF (출제 문항)")
     file_new = st.file_uploader("파일 선택", type="pdf", key="new")
 
-# 분석 실행 버튼
 if file_origin and file_new:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("✨ 분석 시작하기"):
-        with st.spinner('페이지별 문항을 정밀하게 대조하는 중...'):
+        with st.spinner('타이틀을 제외하고 문항만 정밀 대조 중입니다...'):
             list_origin = extract_problems_with_pages(file_origin)
             list_new = extract_problems_with_pages(file_new)
             
             if not list_origin or not list_new:
-                st.error("파일에서 분석 가능한 문항을 찾지 못했습니다.")
+                st.error("분석할 문항을 찾지 못했습니다. PDF 구성을 확인해주세요.")
             else:
                 results = []
                 vectorizer = TfidfVectorizer()
@@ -128,28 +125,20 @@ if file_origin and file_new:
                     })
                 st.session_state.results = results
 
-# 결과 섹션
 if 'results' in st.session_state:
     st.markdown("---")
     st.subheader("📋 분석 리포트")
-    
     for res in st.session_state.results:
         status = "✅"
-        page_display = f"{res['page']}p" if res['page'] > 0 else "정보없음"
         page_tag = ""
-        
         if res['score'] > 40:
             status = "🚨 위험" if res['score'] > 70 else "⚠️ 주의"
-            page_tag = f" [원본 {page_display}]"
+            page_tag = f" [원본 {res['page']}p]"
         
         label = f"{status} | {res['id']}번 문항 (유사도 {res['score']}%){page_tag}"
-        
         with st.expander(label):
             h_new = highlight_common_words(res['new'], res['origin'])
             h_origin = highlight_common_words(res['origin'], res['new'])
-            
             c1, c2 = st.columns(2)
-            with c1:
-                st.markdown(f"<div class='compare-box'><b>[출제 문항]</b><hr>{h_new}</div>", unsafe_allow_html=True)
-            with c2:
-                st.markdown(f"<div class='compare-box'><b>[기준 문항 - {page_display}]</b><hr>{h_origin}</div>", unsafe_allow_html=True)
+            with c1: st.markdown(f"<div class='compare-box'><b>[출제 문항]</b><hr>{h_new}</div>", unsafe_allow_html=True)
+            with c2: st.markdown(f"<div class='compare-box'><b>[기준 문항 - {res['page']}p]</b><hr>{h_origin}</div>", unsafe_allow_html=True)
