@@ -13,102 +13,95 @@ st.markdown("""
     h1, h2, h3 { color: #D63384; }
     div.stButton > button {
         width: 100%; background-color: #FFB6C1; color: white;
-        border-radius: 12px; border: none; height: 3.5em; font-weight: bold; font-size: 1.1rem;
+        border-radius: 12px; border: none; height: 3.5em; font-weight: bold;
     }
-    div.stButton > button:hover { background-color: #FF8DA1; color: white; transform: translateY(-2px); }
     .compare-box {
         border: 2px solid #FFB6C1; padding: 20px; border-radius: 15px;
-        background-color: white; color: black; min-height: 200px; line-height: 1.7;
+        background-color: white; color: black; min-height: 200px; line-height: 1.8;
     }
     mark { background-color: #FFD1DC; color: black; font-weight: bold; border-radius: 3px; padding: 0 2px; }
-    .streamlit-expanderHeader { border: 1px solid #FFB6C1 !important; border-radius: 10px !important; background-color: white !important; }
     </style>
     """, unsafe_allow_html=True)
 
-# --- 텍스트 추출 및 타이틀/노이즈 제거 함수 ---
+# --- [보완] 텍스트 정밀 추출 및 타이틀 제거 ---
 def extract_problems_with_pages(file):
     if file is None: return []
     file.seek(0)
     doc = fitz.open(stream=file.read(), filetype="pdf")
     all_problems = []
     
-    # [강력 필터] 타이틀 및 안내문구 키워드
-    noise_keywords = [
-        '학년도', '영역', '생활과 윤리', '윤리와 사상', '사회·문화', '지리', '역사', 
-        '정답과 해설', '확인사항', '유의사항', '수험번호', '성명', 'EBS', '수능특강'
-    ]
+    # 제외 키워드
+    noise_words = ['학년도', '영역', '확인사항', '유의사항', '성명', '수험번호', '생활과 윤리']
 
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
-        page_text = page.get_text()
-        current_page_no = page_num + 1
+        page_text = page.get_text("text")
         
         # 문항 번호 패턴으로 쪼개기
         split_text = re.split(r'\n(?=\d+[\.|\)])|(?<=\n)(?=\d+[\.|\)])|(?=\[\d+\])', page_text)
         
         for p in split_text:
-            cleaned_p = p.strip()
+            # 줄바꿈과 중복 공백을 하나로 합쳐서 비교 정확도 향상
+            cleaned_p = re.sub(r'\s+', ' ', p).strip()
             
-            # [필터 1] 너무 짧은 건 무조건 패스
-            if len(cleaned_p) < 45: continue
+            # [엄격 필터] 숫자로 시작하지 않거나 너무 짧으면 버림
+            if not re.match(r'^(\d+|\[\d+|[①-⑳])', cleaned_p) or len(cleaned_p) < 50:
+                continue
             
-            # [필터 2] 숫자로 시작하는지 확인 (진짜 문항은 보통 1. 또는 [01]로 시작)
-            starts_with_num = bool(re.match(r'^\d|^\[\d', cleaned_p))
-            
-            # [필터 3] 타이틀 노이즈 검사
-            is_noise = False
-            for key in noise_keywords:
-                if key in cleaned_p:
-                    # 숫자로 시작하지 않으면서 과목명이 들어있으면 100% 타이틀 노이즈
-                    if not starts_with_num:
-                        is_noise = True
-                        break
-            
-            if not is_noise:
-                all_problems.append({
-                    "text": cleaned_p, 
-                    "page": current_page_no
-                })
-                
+            # 타이틀 노이즈 추가 필터
+            if any(nw in cleaned_p[:25] for nw in noise_words):
+                continue
+
+            all_problems.append({"text": cleaned_p, "page": page_num + 1})
     return all_problems
 
-def highlight_common_words(text, reference_text):
-    ref_words = set(re.findall(r'\b\w{2,}\b', reference_text))
-    target_words = re.findall(r'\b\w{2,}\b', text)
-    highlighted_text = text
-    for word in sorted(list(set(target_words)), key=len, reverse=True):
-        if word in ref_words:
-            highlighted_text = re.sub(f'({re.escape(word)})', r'<mark>\1</mark>', highlighted_text)
-    return highlighted_text
+# --- [보완] 하이라이트 로직 (N-gram 기반) ---
+def highlight_common_words(target, reference):
+    """
+    단순 단어 비교가 아니라, 2~3글자 단위로 겹치는 문구를 찾아 하이라이트합니다.
+    """
+    # 텍스트에서 의미 있는 단어(2글자 이상)만 추출
+    target_words = re.findall(r'[가-힣A-Za-z0-9]{2,}', target)
+    ref_words = set(re.findall(r'[가-힣A-Za-z0-9]{2,}', reference))
+    
+    # 겹치는 단어 리스트 추출 (긴 단어 우선)
+    common_words = [word for word in target_words if word in ref_words]
+    common_words = sorted(list(set(common_words)), key=len, reverse=True)
+    
+    highlighted = target
+    for word in common_words:
+        # 이미 하이라이트된 부분 안에 포함된 단어는 건너뛰기 위함
+        pattern = f'({re.escape(word)})'
+        # mark 태그 바깥에 있을 때만 치환
+        highlighted = re.sub(pattern, r'<mark>\1</mark>', highlighted)
+        
+    return highlighted
 
-# --- UI 레이아웃 ---
+# --- UI 및 분석 로직 ---
 st.title("🔍 문항 유사도 정밀 분석기")
-st.write("시험지 타이틀(학년도, 과목명) 및 확인사항을 자동으로 제외하고 분석합니다.")
 
 col1, col2 = st.columns(2)
 with col1:
-    st.markdown("#### 📘 기준 PDF (수특/평가원)")
-    file_origin = st.file_uploader("파일 선택", type="pdf", key="origin")
+    file_origin = st.file_uploader("📘 기준 PDF", type="pdf", key="origin")
 with col2:
-    st.markdown("#### 📝 대상 PDF (출제 문항)")
-    file_new = st.file_uploader("파일 선택", type="pdf", key="new")
+    file_new = st.file_uploader("📝 대상 PDF", type="pdf", key="new")
 
 if file_origin and file_new:
-    st.markdown("<br>", unsafe_allow_html=True)
     if st.button("✨ 분석 시작하기"):
-        with st.spinner('타이틀을 제외하고 문항만 정밀 대조 중입니다...'):
+        with st.spinner('문구 하나하나 대조 중...'):
             list_origin = extract_problems_with_pages(file_origin)
             list_new = extract_problems_with_pages(file_new)
             
             if not list_origin or not list_new:
-                st.error("분석할 문항을 찾지 못했습니다. PDF 구성을 확인해주세요.")
+                st.error("문항을 찾지 못했습니다.")
             else:
                 results = []
-                vectorizer = TfidfVectorizer()
+                # 문항 비교 시 정확도를 위해 Tfidf 파라미터 조정
+                vectorizer = TfidfVectorizer(ngram_range=(1, 2)) 
                 
                 for i, new_item in enumerate(list_new):
                     new_p = new_item['text']
-                    best_score, best_match, found_page = 0, "매칭 항목 없음", 0
+                    best_score, best_match, found_page = 0, "", 0
                     
                     for origin_item in list_origin:
                         origin_p = origin_item['text']
@@ -126,19 +119,17 @@ if file_origin and file_new:
                 st.session_state.results = results
 
 if 'results' in st.session_state:
-    st.markdown("---")
-    st.subheader("📋 분석 리포트")
     for res in st.session_state.results:
         status = "✅"
-        page_tag = ""
         if res['score'] > 40:
             status = "🚨 위험" if res['score'] > 70 else "⚠️ 주의"
-            page_tag = f" [원본 {res['page']}p]"
         
-        label = f"{status} | {res['id']}번 문항 (유사도 {res['score']}%){page_tag}"
+        label = f"{status} | {res['id']}번 (유사도 {res['score']}%)[원본 {res['page']}p]"
         with st.expander(label):
+            # 개선된 하이라이트 함수 호출
             h_new = highlight_common_words(res['new'], res['origin'])
             h_origin = highlight_common_words(res['origin'], res['new'])
+            
             c1, c2 = st.columns(2)
-            with c1: st.markdown(f"<div class='compare-box'><b>[출제 문항]</b><hr>{h_new}</div>", unsafe_allow_html=True)
-            with c2: st.markdown(f"<div class='compare-box'><b>[기준 문항 - {res['page']}p]</b><hr>{h_origin}</div>", unsafe_allow_html=True)
+            with c1: st.markdown(f"<div class='compare-box'><b>[출제]</b><hr>{h_new}</div>", unsafe_allow_html=True)
+            with c2: st.markdown(f"<div class='compare-box'><b>[기준 - {res['page']}p]</b><hr>{h_origin}</div>", unsafe_allow_html=True)
