@@ -22,44 +22,56 @@ st.markdown("""
     </style>
     """, unsafe_allow_html=True)
 
-# --- 텍스트 정규화 함수 ---
-def clean_text(text):
-    text = re.sub(r'\s+', ' ', text) # 줄바꿈, 다중 공백 제거
-    return text.strip()
-
-# --- PDF에서 문항 추출 (타이틀/확인사항 완벽 필터) ---
+# --- [핵심 수정] 문항과 선지를 하나로 묶는 추출 함수 ---
 def extract_problems_with_pages(file):
     if file is None: return []
     file.seek(0)
     doc = fitz.open(stream=file.read(), filetype="pdf")
     all_problems = []
     
-    # 분석에서 제외할 타이틀/노이즈 키워드
     noise_keywords = ['학년도', '영역', '확인사항', '유의사항', '성명', '수험번호', '생활과 윤리']
 
     for page_num in range(len(doc)):
         page = doc.load_page(page_num)
-        page_text = page.get_text()
-        # 문항 번호 패턴(1., [01], ① 등)으로 쪼개기
-        split_text = re.split(r'\n(?=\d+[\.|\)])|(?<=\n)(?=\d+[\.|\)])|(?=\[\d+\])|(?=\n[①-⑳])', page_text)
+        page_text = page.get_text("text")
         
-        for p in split_text:
-            cleaned_p = clean_text(p)
+        # 줄바꿈 단위로 먼저 쪼갬
+        lines = page_text.split('\n')
+        
+        current_prob = ""
+        for line in lines:
+            cleaned_line = line.strip()
+            if not cleaned_line: continue
             
-            # [필터] 문항 번호로 시작하고, 길이가 50자 이상인 경우만 수집
-            if re.match(r'^(\d+|\[\d+|[①-⑳])', cleaned_p) and len(cleaned_p) >= 50:
-                # 앞부분에 노이즈 키워드가 있으면 제외
-                if not any(nk in cleaned_p[:35] for nk in noise_keywords):
-                    all_problems.append({"text": cleaned_p, "page": page_num + 1})
+            # 새 문항의 시작 패턴 (숫자. 또는 [숫자] 또는 숫자))
+            is_new_start = bool(re.match(r'^(\d+[\.|\)]|\[\d+\])', cleaned_line))
+            
+            # 만약 새 번호로 시작하고, 기존에 쌓인 문장이 있다면 저장
+            if is_new_start and current_prob:
+                # 노이즈 필터링 후 저장
+                if len(current_prob) >= 45 and not any(nk in current_prob[:30] for nk in noise_keywords):
+                    all_problems.append({"text": current_prob, "page": page_num + 1})
+                current_prob = cleaned_line # 새 문항 시작
+            else:
+                # 번호로 시작하지 않는 선지나 본문 내용은 이전 내용에 합침
+                if current_prob:
+                    current_prob += " " + cleaned_line
+                else:
+                    # 문서 맨 처음 시작 처리
+                    current_prob = cleaned_line
+
+        # 마지막 문항 처리
+        if current_prob and len(current_prob) >= 45:
+            all_problems.append({"text": current_prob, "page": page_num + 1})
+                
     return all_problems
 
-# --- 변별력 있는 하이라이트 (6글자 이상 일치 시) ---
+# --- [변별력 하이라이트] 6글자 이상 일치 시 ---
 def highlight_selective(target, reference):
     ref_stripped = re.sub(r'\s+', '', reference)
-    min_match_len = 6 # 6글자 이상 겹쳐야 의미 있는 유사 문구로 판단
+    min_match_len = 6 
     
     to_highlight = []
-    # 슬라이딩 윈도우로 겹치는 문구 탐색
     for i in range(len(target) - min_match_len + 1):
         chunk = target[i:i+min_match_len]
         if len(chunk.strip()) < min_match_len: continue
@@ -68,7 +80,6 @@ def highlight_selective(target, reference):
         if chunk_stripped in ref_stripped:
             to_highlight.append(chunk)
 
-    # 긴 문구부터 마킹하여 중복 방지
     sorted_chunks = sorted(list(set(to_highlight)), key=len, reverse=True)
     result = target
     for chunk in sorted_chunks:
@@ -87,17 +98,15 @@ with col1:
 with col2:
     file_new = st.file_uploader("📝 대상 PDF (출제 문항)", type="pdf", key="new")
 
-# 분석 로직 실행
 if file_origin and file_new:
     st.markdown("<br>", unsafe_allow_html=True)
     if st.button("✨ 분석 시작하기"):
-        with st.spinner('문항을 분석하고 대조하는 중입니다...'):
+        with st.spinner('문항과 선지를 통합하여 분석 중입니다...'):
             list_origin = extract_problems_with_pages(file_origin)
             list_new = extract_problems_with_pages(file_new)
             
             if list_origin and list_new:
                 results = []
-                # 단어 단위 TF-IDF로 변별력 확보
                 vectorizer = TfidfVectorizer(ngram_range=(1, 2))
                 
                 for i, new_item in enumerate(list_new):
@@ -118,14 +127,10 @@ if file_origin and file_new:
                         "origin": best_match, "new": new_p, "page": found_page
                     })
                 st.session_state.results = results
-            else:
-                st.error("문항을 추출하지 못했습니다. PDF 구성을 확인해 주세요.")
 
-# 결과 출력
 if 'results' in st.session_state:
     st.markdown("---")
     for res in st.session_state.results:
-        # 유사도 기준: 35% 주의, 65% 위험
         status = "✅"
         if res['score'] > 65: status = "🚨 위험"
         elif res['score'] > 35: status = "⚠️ 주의"
