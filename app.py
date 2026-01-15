@@ -98,7 +98,7 @@ def highlight_precise(target, reference):
     return result
 
 # --- UI 및 분석 로직 ---
-st.title("🔍 문항 유사도 정밀 분석기 (정확도 강화)")
+st.title("🔍 문항 유사도 정밀 분석기 ")
 
 col1, col2 = st.columns(2)
 with col1:
@@ -154,3 +154,4 @@ if 'results' in st.session_state:
             c1, c2 = st.columns(2)
             with c1: st.markdown(f"<div class='compare-box'><b>[출제 문항]</b><hr>{h_new}</div>", unsafe_allow_html=True)
             with c2: st.markdown(f"<div class='compare-box'><b>[기준 문항 - {res['page']}p]</b><hr>{h_origin}</div>", unsafe_allow_html=True)
+
